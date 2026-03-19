@@ -544,8 +544,6 @@ rel_time_t realtime(const time_t exptime);
 void rtc_settings_init(void);
 void rtc_stats_init(void);
 void rtc_update_time(void);
-void rtc_advance_time(rel_time_t delta);
-char *rtc_stats_snapshot(size_t *length);
 LIBEVENT_THREAD *rtc_thread_get(int thread_id);
 
 #if HAVE_DROP_PRIVILEGES

@@ -694,11 +694,6 @@ void thread_init(int nthreads, struct event_base *main_base) {
     settings.num_threads = nthreads;
     for (i = 0; i < nthreads; i++) {
         threads[i].thread_id = pthread_self();
-        threads[i].base = NULL;
-        threads[i].notify_receive_fd = -1;
-        threads[i].notify_send_fd = -1;
-        threads[i].new_conn_queue = NULL;
-        threads[i].suffix_cache = NULL;
         if (pthread_mutex_init(&threads[i].stats.mutex, NULL) != 0) {
             perror("Failed to initialize thread stats mutex");
             exit(EXIT_FAILURE);
