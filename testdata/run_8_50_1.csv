@@ -1,0 +1,7 @@
+# op,key,value
+READ,user0004,
+UPDATE,user0005,51
+READ,user0005,
+INSERT,user0010,100
+DELETE,user0006,
+READ,user0006,
