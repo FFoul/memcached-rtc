@@ -73,6 +73,28 @@ void assoc_init(const int hashtable_init) {
     STATS_UNLOCK();
 }
 
+#ifdef RTC_BENCHMARK
+item *assoc_find(uint64_t key, const uint32_t hv) {
+    item *it;
+    unsigned int oldbucket;
+
+    if (expanding &&
+        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket) {
+        it = old_hashtable[oldbucket];
+    } else {
+        it = primary_hashtable[hv & hashmask(hashpower)];
+    }
+
+    while (it) {
+        if (it->rtc_key == key) {
+            return it;
+        }
+        it = it->h_next;
+    }
+
+    return NULL;
+}
+#else
 item *assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
     item *it;
     unsigned int oldbucket;
@@ -98,10 +120,29 @@ item *assoc_find(const char *key, const size_t nkey, const uint32_t hv) {
     MEMCACHED_ASSOC_FIND(key, nkey, depth);
     return ret;
 }
+#endif
 
 /* returns the address of the item pointer before the key.  if *item == 0,
    the item wasn't found */
 
+#ifdef RTC_BENCHMARK
+static item **_hashitem_before(uint64_t key, const uint32_t hv) {
+    item **pos;
+    unsigned int oldbucket;
+
+    if (expanding &&
+        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket) {
+        pos = &old_hashtable[oldbucket];
+    } else {
+        pos = &primary_hashtable[hv & hashmask(hashpower)];
+    }
+
+    while (*pos && (*pos)->rtc_key != key) {
+        pos = &(*pos)->h_next;
+    }
+    return pos;
+}
+#else
 static item** _hashitem_before (const char *key, const size_t nkey, const uint32_t hv) {
     item **pos;
     unsigned int oldbucket;
@@ -119,6 +160,7 @@ static item** _hashitem_before (const char *key, const size_t nkey, const uint32
     }
     return pos;
 }
+#endif
 
 /* grows the hashtable to the next power of 2. */
 static void assoc_expand(void) {
@@ -164,10 +206,24 @@ int assoc_insert(item *it, const uint32_t hv) {
         assoc_expand();
     }
 
-    MEMCACHED_ASSOC_INSERT(ITEM_key(it), it->nkey, hash_items);
     return 1;
 }
 
+#ifdef RTC_BENCHMARK
+void assoc_delete(uint64_t key, const uint32_t hv) {
+    item **before = _hashitem_before(key, hv);
+
+    if (*before) {
+        item *nxt;
+        hash_items--;
+        nxt = (*before)->h_next;
+        (*before)->h_next = 0;
+        *before = nxt;
+        return;
+    }
+    assert(*before != 0);
+}
+#else
 void assoc_delete(const char *key, const size_t nkey, const uint32_t hv) {
     item **before = _hashitem_before(key, nkey, hv);
 
@@ -187,6 +243,7 @@ void assoc_delete(const char *key, const size_t nkey, const uint32_t hv) {
        they can't find. */
     assert(*before != 0);
 }
+#endif
 
 
 static volatile int do_run_maintenance_thread = 1;
@@ -210,7 +267,7 @@ static void *assoc_maintenance_thread(void *arg) {
             for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
                 next = it->h_next;
 
-                bucket = hash(ITEM_key(it), it->nkey, 0) & hashmask(hashpower);
+                bucket = rtc_hash(it->rtc_key) & hashmask(hashpower);
                 it->h_next = primary_hashtable[bucket];
                 primary_hashtable[bucket] = it;
             }
@@ -268,5 +325,4 @@ void stop_assoc_maintenance_thread() {
     /* Wait for the maintenance thread to stop */
     pthread_join(maintenance_tid, NULL);
 }
-
 

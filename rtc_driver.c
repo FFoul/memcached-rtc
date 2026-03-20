@@ -26,7 +26,6 @@ typedef struct {
     int thread_id;
     int num_operations;
     int read_ratio;
-    const char *data_dir;
     replay_result result;
     int rc;
 } run_worker;
@@ -65,6 +64,26 @@ static void fill_default_value(char value[VALUE_SIZE]) {
     value[VALUE_SIZE - 1] = '\0';
 }
 
+static size_t estimate_required_bytes(int num_operations) {
+    size_t per_item = sizeof(item) + VALUE_SIZE + 2;
+    size_t data_bytes;
+    size_t bucket_count = 1;
+    size_t hash_bytes;
+
+    if (settings.use_cas) {
+        per_item += sizeof(uint64_t);
+    }
+
+    data_bytes = (size_t)num_operations * per_item;
+
+    while (bucket_count < (size_t)num_operations) {
+        bucket_count <<= 1;
+    }
+    hash_bytes = bucket_count * sizeof(void *);
+
+    return (data_bytes + hash_bytes) * 2;
+}
+
 static int format_load_trace_path(char *buffer, size_t size, const char *data_dir,
                                   int num_operations) {
     return snprintf(buffer, size, "%s/load_%d.csv", data_dir, num_operations);
@@ -94,17 +113,12 @@ static void rtc_note_set_cmd(conn *connection, item *it) {
     pthread_mutex_unlock(&connection->thread->stats.mutex);
 }
 
-static bool rtc_store_bytes(conn *connection, int command, const char *key,
+static bool rtc_store_bytes(conn *connection, int command, uint64_t key,
                             const void *value, size_t value_len) {
-    const size_t key_len = strlen(key);
     item *it;
     enum store_item_type result;
 
-    if (key_len == 0 || key_len > KEY_MAX_LENGTH) {
-        return false;
-    }
-
-    it = item_alloc((char *)key, key_len, 0, realtime(0), (int)value_len + 2);
+    it = item_alloc(key, 0, realtime(0), (int)value_len + 2);
     if (it == NULL) {
         return false;
     }
@@ -118,16 +132,11 @@ static bool rtc_store_bytes(conn *connection, int command, const char *key,
     return result == STORED;
 }
 
-static bool rtc_read_exists(conn *connection, const char *key) {
-    const size_t key_len = strlen(key);
+static bool rtc_read_exists(conn *connection, uint64_t key) {
     item *it;
     bool hit;
 
-    if (key_len == 0 || key_len > KEY_MAX_LENGTH) {
-        return false;
-    }
-
-    it = item_get(key, key_len);
+    it = item_get(key);
     hit = it != NULL;
 
     pthread_mutex_lock(&connection->thread->stats.mutex);
@@ -146,19 +155,23 @@ static bool rtc_read_exists(conn *connection, const char *key) {
     return hit;
 }
 
-static bool format_numeric_key(char *buffer, size_t size, const char *text) {
-    unsigned long long key = strtoull(text, NULL, 10);
-    int written;
+static bool parse_numeric_key(uint64_t *key, const char *text) {
+    char *endptr;
+    unsigned long long parsed;
 
-    written = snprintf(buffer, size, "%llu", key);
-    return written > 0 && (size_t)written < size;
+    parsed = strtoull(text, &endptr, 10);
+    if (text == endptr) {
+        return false;
+    }
+
+    *key = (uint64_t)parsed;
+    return true;
 }
 
 static int populate(conn *connection, const char *data_dir, int num_operations,
                     replay_result *result) {
     char file_name[PATH_MAX];
     char line[128];
-    char key_buffer[32];
     char value[VALUE_SIZE];
     FILE *populate_fp;
     uint64_t start;
@@ -180,7 +193,9 @@ static int populate(conn *connection, const char *data_dir, int num_operations,
     start = mstime();
 
     while (cnt++ < num_operations && fgets(line, sizeof(line), populate_fp)) {
-        if (!format_numeric_key(key_buffer, sizeof(key_buffer), line)) {
+        uint64_t key;
+
+        if (!parse_numeric_key(&key, line)) {
             fprintf(stderr, "invalid populate key: %s\n", line);
             fclose(populate_fp);
             return 1;
@@ -188,9 +203,9 @@ static int populate(conn *connection, const char *data_dir, int num_operations,
 
         result->ops++;
         result->writes++;
-        if (!rtc_store_bytes(connection, NREAD_ADD, key_buffer, value,
-                             VALUE_SIZE)) {
-            fprintf(stderr, "failed to populate key %s\n", key_buffer);
+        if (!rtc_store_bytes(connection, NREAD_ADD, key, value, VALUE_SIZE)) {
+            fprintf(stderr, "failed to populate key %llu\n",
+                    (unsigned long long)key);
             fclose(populate_fp);
             return 1;
         }
@@ -206,7 +221,6 @@ static int populate(conn *connection, const char *data_dir, int num_operations,
 static int replay_run_trace(conn *connection, const char *path,
                             int num_operations, replay_result *result) {
     char line[128];
-    char key_buffer[32];
     char value[VALUE_SIZE];
     FILE *benchmark_fp = fopen(path, "r");
     uint64_t start;
@@ -235,7 +249,9 @@ static int replay_run_trace(conn *connection, const char *path,
         operation = line;
         key_text = comma + 1;
 
-        if (!format_numeric_key(key_buffer, sizeof(key_buffer), key_text)) {
+        uint64_t key;
+
+        if (!parse_numeric_key(&key, key_text)) {
             fprintf(stderr, "invalid benchmark key in %s: %s\n", path, key_text);
             fclose(benchmark_fp);
             return 1;
@@ -244,7 +260,7 @@ static int replay_run_trace(conn *connection, const char *path,
         if (strcmp(operation, "READ") == 0) {
             result->ops++;
             result->reads++;
-            if (rtc_read_exists(connection, key_buffer)) {
+            if (rtc_read_exists(connection, key)) {
                 result->read_hits++;
             } else {
                 result->read_misses++;
@@ -252,9 +268,10 @@ static int replay_run_trace(conn *connection, const char *path,
         } else if (strcmp(operation, "UPDATE") == 0) {
             result->ops++;
             result->writes++;
-            if (!rtc_store_bytes(connection, NREAD_SET, key_buffer, value,
+            if (!rtc_store_bytes(connection, NREAD_SET, key, value,
                                  VALUE_SIZE)) {
-                fprintf(stderr, "failed to update key %s\n", key_buffer);
+                fprintf(stderr, "failed to update key %llu\n",
+                        (unsigned long long)key);
                 fclose(benchmark_fp);
                 return 1;
             }
@@ -281,23 +298,23 @@ static void accumulate_result(replay_result *dst, const replay_result *src) {
 static void *run_worker_main(void *arg) {
     run_worker *worker = arg;
     conn connection;
-    char benchmark_fname[PATH_MAX];
+    char trace_path[PATH_MAX];
 
     if (!rtc_conn_init(&connection, worker->thread_id)) {
         worker->rc = 1;
         return NULL;
     }
 
-    if (format_run_trace_path(benchmark_fname, sizeof(benchmark_fname),
-                              worker->data_dir, worker->num_operations,
-                              worker->read_ratio, worker->thread_id) <= 0) {
+    if (format_run_trace_path(trace_path, sizeof(trace_path), DEFAULT_DATA_DIR,
+                              worker->num_operations, worker->read_ratio,
+                              worker->thread_id) <= 0) {
         fprintf(stderr, "run trace path too long for worker %d\n",
                 worker->thread_id);
         worker->rc = 1;
         return NULL;
     }
 
-    worker->rc = replay_run_trace(&connection, benchmark_fname,
+    worker->rc = replay_run_trace(&connection, trace_path,
                                   worker->num_operations, &worker->result);
     if (worker->rc != 0) {
         worker->rc = 1;
@@ -353,11 +370,18 @@ static int run_benchmark(const char *data_dir, int num_operations,
     printf("\n=== Benchmark Phase ===\n");
     start_bench = mstime();
 
+    if (strcmp(data_dir, DEFAULT_DATA_DIR) != 0) {
+        fprintf(stderr, "RTC benchmark requires --data-dir to remain %s\n",
+                DEFAULT_DATA_DIR);
+        free(workers);
+        free(threads);
+        return 1;
+    }
+
     for (i = 0; i < num_servers; i++) {
         workers[i].thread_id = i;
         workers[i].num_operations = num_operations;
         workers[i].read_ratio = read_ratio;
-        workers[i].data_dir = data_dir;
         if (pthread_create(&threads[i], NULL, run_worker_main, &workers[i]) !=
             0) {
             fprintf(stderr, "failed to create worker thread %d\n", i);
@@ -431,6 +455,7 @@ int main(int argc, char **argv) {
     }
 
     rtc_settings_init();
+    settings.maxbytes = estimate_required_bytes(num_operations);
     rtc_stats_init();
     rtc_update_time();
 

@@ -362,17 +362,36 @@ int is_listen_thread() {
 /*
  * Allocates a new item.
  */
+#ifdef RTC_BENCHMARK
+item *item_alloc(uint64_t key, int flags, rel_time_t exptime, int nbytes) {
+    item *it;
+    it = do_item_alloc(key, flags, exptime, nbytes);
+    return it;
+}
+#else
 item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
     item *it;
     /* do_item_alloc handles its own locks */
     it = do_item_alloc(key, nkey, flags, exptime, nbytes);
     return it;
 }
+#endif
 
 /*
  * Returns an item if it hasn't been marked as expired,
  * lazy-expiring as needed.
  */
+#ifdef RTC_BENCHMARK
+item *item_get(uint64_t key) {
+    item *it;
+    uint32_t hv;
+    hv = rtc_hash(key);
+    item_lock(hv);
+    it = do_item_get(key, hv);
+    item_unlock(hv);
+    return it;
+}
+#else
 item *item_get(const char *key, const size_t nkey) {
     item *it;
     uint32_t hv;
@@ -382,7 +401,19 @@ item *item_get(const char *key, const size_t nkey) {
     item_unlock(hv);
     return it;
 }
+#endif
 
+#ifdef RTC_BENCHMARK
+item *item_touch(uint64_t key, uint32_t exptime) {
+    item *it;
+    uint32_t hv;
+    hv = rtc_hash(key);
+    item_lock(hv);
+    it = do_item_touch(key, exptime, hv);
+    item_unlock(hv);
+    return it;
+}
+#else
 item *item_touch(const char *key, size_t nkey, uint32_t exptime) {
     item *it;
     uint32_t hv;
@@ -392,6 +423,7 @@ item *item_touch(const char *key, size_t nkey, uint32_t exptime) {
     item_unlock(hv);
     return it;
 }
+#endif
 
 /*
  * Links an item into the LRU and hashtable.
@@ -400,7 +432,11 @@ int item_link(item *item) {
     int ret;
     uint32_t hv;
 
+#ifdef RTC_BENCHMARK
+    hv = rtc_hash(item->rtc_key);
+#else
     hv = hash(ITEM_key(item), item->nkey, 0);
+#endif
     item_lock(hv);
     ret = do_item_link(item, hv);
     item_unlock(hv);
@@ -413,7 +449,11 @@ int item_link(item *item) {
  */
 void item_remove(item *item) {
     uint32_t hv;
+#ifdef RTC_BENCHMARK
+    hv = rtc_hash(item->rtc_key);
+#else
     hv = hash(ITEM_key(item), item->nkey, 0);
+#endif
 
     item_lock(hv);
     do_item_remove(item);
@@ -434,7 +474,11 @@ int item_replace(item *old_it, item *new_it, const uint32_t hv) {
  */
 void item_unlink(item *item) {
     uint32_t hv;
+#ifdef RTC_BENCHMARK
+    hv = rtc_hash(item->rtc_key);
+#else
     hv = hash(ITEM_key(item), item->nkey, 0);
+#endif
     item_lock(hv);
     do_item_unlink(item, hv);
     item_unlock(hv);
@@ -445,7 +489,11 @@ void item_unlink(item *item) {
  */
 void item_update(item *item) {
     uint32_t hv;
+#ifdef RTC_BENCHMARK
+    hv = rtc_hash(item->rtc_key);
+#else
     hv = hash(ITEM_key(item), item->nkey, 0);
+#endif
 
     item_lock(hv);
     do_item_update(item);
@@ -455,6 +503,20 @@ void item_update(item *item) {
 /*
  * Does arithmetic on a numeric item value.
  */
+#ifdef RTC_BENCHMARK
+enum delta_result_type add_delta(conn *c, const uint64_t key,
+                                 int incr, const int64_t delta, char *buf,
+                                 uint64_t *cas) {
+    enum delta_result_type ret;
+    uint32_t hv;
+
+    hv = rtc_hash(key);
+    item_lock(hv);
+    ret = do_add_delta(c, key, incr, delta, buf, cas, hv);
+    item_unlock(hv);
+    return ret;
+}
+#else
 enum delta_result_type add_delta(conn *c, const char *key,
                                  const size_t nkey, int incr,
                                  const int64_t delta, char *buf,
@@ -468,6 +530,7 @@ enum delta_result_type add_delta(conn *c, const char *key,
     item_unlock(hv);
     return ret;
 }
+#endif
 
 /*
  * Stores an item in the cache (high level, obeys set/add/replace semantics)
@@ -476,7 +539,11 @@ enum store_item_type store_item(item *item, int comm, conn* c) {
     enum store_item_type ret;
     uint32_t hv;
 
+#ifdef RTC_BENCHMARK
+    hv = rtc_hash(item->rtc_key);
+#else
     hv = hash(ITEM_key(item), item->nkey, 0);
+#endif
     item_lock(hv);
     ret = do_store_item(item, comm, c, hv);
     item_unlock(hv);

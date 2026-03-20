@@ -103,6 +103,13 @@ struct event {
     } \
 }
 
+#ifdef RTC_BENCHMARK
+#define ITEM_data(item) (((char*)&((item)->data)) \
+         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+
+#define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nbytes \
+         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+#else
 #define ITEM_key(item) (((char*)&((item)->data)) \
          + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
@@ -116,6 +123,7 @@ struct event {
 #define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 \
          + (item)->nsuffix + (item)->nbytes \
          + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+#endif
 
 #define STAT_KEY_LEN 128
 #define STAT_VAL_LEN 128
@@ -338,10 +346,21 @@ typedef struct _stritem {
     rel_time_t      exptime;    /* expire time */
     int             nbytes;     /* size of data */
     unsigned short  refcount;
+#ifdef RTC_BENCHMARK
+    uint64_t        rtc_key;    /* benchmark key */
+    uint8_t         rtc_reserved[2];
+#else
     uint8_t         nsuffix;    /* length of flags-and-length string */
     uint8_t         it_flags;   /* ITEM_* above */
     uint8_t         slabs_clsid;/* which slab class we're in */
     uint8_t         nkey;       /* key length, w/terminating null and padding */
+#endif
+#ifdef RTC_BENCHMARK
+    uint8_t         nsuffix;    /* unused in RTC benchmark mode */
+    uint8_t         it_flags;   /* ITEM_* above */
+    uint8_t         slabs_clsid;/* which slab class we're in */
+    uint8_t         nkey;       /* unused in RTC benchmark mode */
+#endif
     /* this odd type prevents type-punning issues when we do
      * the little shuffle to save space when not using CAS. */
     union {
@@ -474,10 +493,17 @@ extern volatile rel_time_t current_time;
  * Functions
  */
 void do_accept_new_conns(const bool do_accept);
+#ifdef RTC_BENCHMARK
+enum delta_result_type do_add_delta(conn *c, const uint64_t key,
+                                    const bool incr, const int64_t delta,
+                                    char *buf, uint64_t *cas,
+                                    const uint32_t hv);
+#else
 enum delta_result_type do_add_delta(conn *c, const char *key,
                                     const size_t nkey, const bool incr,
                                     const int64_t delta, char *buf,
                                     uint64_t *cas, const uint32_t hv);
+#endif
 enum store_item_type do_store_item(item *item, int comm, conn* c, const uint32_t hv);
 conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
 extern int daemonize(int nochdir, int noclose);
@@ -510,19 +536,31 @@ int  dispatch_event_add(int thread, conn *c);
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum network_transport transport);
 
 /* Lock wrappers for cache functions that are called from main loop. */
+#ifdef RTC_BENCHMARK
+enum delta_result_type add_delta(conn *c, const uint64_t key,
+                                 const int incr, const int64_t delta,
+                                 char *buf, uint64_t *cas);
+item *item_alloc(uint64_t key, int flags, rel_time_t exptime, int nbytes);
+item *item_get(uint64_t key);
+item *item_touch(uint64_t key, uint32_t exptime);
+static inline uint32_t rtc_hash(uint64_t key) {
+    return hash((const char *)&key, sizeof(key), 0);
+}
+#else
 enum delta_result_type add_delta(conn *c, const char *key,
                                  const size_t nkey, const int incr,
                                  const int64_t delta, char *buf,
                                  uint64_t *cas);
+item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+item *item_get(const char *key, const size_t nkey);
+item *item_touch(const char *key, const size_t nkey, uint32_t exptime);
+#endif
 void accept_new_conns(const bool do_accept);
 conn *conn_from_freelist(void);
 bool  conn_add_to_freelist(conn *c);
 int   is_listen_thread(void);
-item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
 char *item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
 void  item_flush_expired(void);
-item *item_get(const char *key, const size_t nkey);
-item *item_touch(const char *key, const size_t nkey, uint32_t exptime);
 int   item_link(item *it);
 void  item_remove(item *it);
 int   item_replace(item *it, item *new_it, const uint32_t hv);

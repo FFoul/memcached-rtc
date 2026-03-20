@@ -86,7 +86,7 @@ void append_stat(const char *name, ADD_STAT add_stats, conn *c,
 
 enum store_item_type do_store_item(item *it, int comm, conn *c,
                                    const uint32_t hv) {
-    item *old_it = do_item_get(ITEM_key(it), it->nkey, hv);
+    item *old_it = do_item_get(it->rtc_key, hv);
 
     if (comm == NREAD_ADD && old_it != NULL) {
         do_item_remove(old_it);
@@ -111,13 +111,12 @@ enum store_item_type do_store_item(item *it, int comm, conn *c,
     return STORED;
 }
 
-enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
+enum delta_result_type do_add_delta(conn *c, const uint64_t key,
                                     const bool incr, const int64_t delta,
                                     char *buf, uint64_t *cas,
                                     const uint32_t hv) {
     (void)c;
     (void)key;
-    (void)nkey;
     (void)incr;
     (void)delta;
     (void)buf;

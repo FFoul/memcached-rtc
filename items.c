@@ -85,6 +85,108 @@ static size_t item_make_header(const uint8_t nkey, const int flags, const int nb
 }
 
 /*@null@*/
+#ifdef RTC_BENCHMARK
+item *do_item_alloc(uint64_t key, const int flags, const rel_time_t exptime,
+                    const int nbytes) {
+    item *it = NULL;
+    size_t ntotal = sizeof(item) + nbytes;
+    if (settings.use_cas) {
+        ntotal += sizeof(uint64_t);
+    }
+
+    unsigned int id = slabs_clsid(ntotal);
+    if (id == 0)
+        return 0;
+
+    mutex_lock(&cache_lock);
+    item *search;
+    rel_time_t oldest_live = settings.oldest_live;
+
+    search = tails[id];
+    if (search == NULL) {
+        it = slabs_alloc(ntotal, id);
+    } else if (search->refcount == 0) {
+        if ((search->time < oldest_live) ||
+            (search->exptime != 0 && search->exptime < current_time)) {
+            STATS_LOCK();
+            stats.reclaimed++;
+            STATS_UNLOCK();
+            itemstats[id].reclaimed++;
+            if ((search->it_flags & ITEM_FETCHED) == 0) {
+                STATS_LOCK();
+                stats.expired_unfetched++;
+                STATS_UNLOCK();
+                itemstats[id].expired_unfetched++;
+            }
+            it = search;
+            it->refcount = 1;
+            slabs_adjust_mem_requested(it->slabs_clsid, ITEM_ntotal(it), ntotal);
+            do_item_unlink_nolock(it, rtc_hash(it->rtc_key));
+            it->slabs_clsid = 0;
+            it->refcount = 0;
+        }
+    }
+
+    if (it == NULL && (it = slabs_alloc(ntotal, id)) == NULL) {
+        if (search->refcount == 0 &&
+            (search->exptime == 0 || search->exptime > current_time)) {
+            if (settings.evict_to_free == 0) {
+                itemstats[id].outofmemory++;
+                pthread_mutex_unlock(&cache_lock);
+                return NULL;
+            }
+            itemstats[id].evicted++;
+            itemstats[id].evicted_time = current_time - search->time;
+            if (search->exptime != 0)
+                itemstats[id].evicted_nonzero++;
+            if ((search->it_flags & ITEM_FETCHED) == 0) {
+                STATS_LOCK();
+                stats.evicted_unfetched++;
+                STATS_UNLOCK();
+                itemstats[id].evicted_unfetched++;
+            }
+            STATS_LOCK();
+            stats.evictions++;
+            STATS_UNLOCK();
+            it = search;
+            it->refcount = 1;
+            slabs_adjust_mem_requested(it->slabs_clsid, ITEM_ntotal(it), ntotal);
+            do_item_unlink_nolock(it, rtc_hash(it->rtc_key));
+            it->slabs_clsid = 0;
+            it->refcount = 0;
+        }
+    }
+
+    if (it == NULL) {
+        itemstats[id].outofmemory++;
+        if (search != NULL &&
+            search->refcount != 0 &&
+            search->time + TAIL_REPAIR_TIME < current_time) {
+            itemstats[id].tailrepairs++;
+            search->refcount = 0;
+            do_item_unlink_nolock(search, rtc_hash(search->rtc_key));
+        }
+        pthread_mutex_unlock(&cache_lock);
+        return NULL;
+    }
+
+    assert(it->slabs_clsid == 0);
+    it->slabs_clsid = id;
+    assert(it != heads[it->slabs_clsid]);
+
+    it->next = it->prev = it->h_next = 0;
+    it->refcount = 1;
+    DEBUG_REFCNT(it, '*');
+    it->it_flags = settings.use_cas ? ITEM_CAS : 0;
+    it->nkey = 0;
+    it->nsuffix = 0;
+    it->nbytes = nbytes;
+    it->rtc_key = key;
+    it->exptime = exptime;
+    pthread_mutex_unlock(&cache_lock);
+    return it;
+}
+#else
 item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes) {
     uint8_t nsuffix;
     item *it = NULL;
@@ -199,6 +301,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     pthread_mutex_unlock(&cache_lock);
     return it;
 }
+#endif
 
 void item_free(item *it) {
     size_t ntotal = ITEM_ntotal(it);
@@ -220,6 +323,16 @@ void item_free(item *it) {
  * Returns true if an item will fit in the cache (its size does not exceed
  * the maximum for a cache entry.)
  */
+#ifdef RTC_BENCHMARK
+bool item_size_ok(const int flags, const int nbytes) {
+    size_t ntotal = sizeof(item) + nbytes;
+    (void)flags;
+    if (settings.use_cas) {
+        ntotal += sizeof(uint64_t);
+    }
+    return slabs_clsid(ntotal) != 0;
+}
+#else
 bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
     char prefix[40];
     uint8_t nsuffix;
@@ -232,6 +345,7 @@ bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
 
     return slabs_clsid(ntotal) != 0;
 }
+#endif
 
 static void item_link_q(item *it) { /* item is the new head */
     item **head, **tail;
@@ -275,7 +389,6 @@ static void item_unlink_q(item *it) {
 }
 
 int do_item_link(item *it, const uint32_t hv) {
-    MEMCACHED_ITEM_LINK(ITEM_key(it), it->nkey, it->nbytes);
     assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
     it->it_flags |= ITEM_LINKED;
     it->time = current_time;
@@ -297,7 +410,6 @@ int do_item_link(item *it, const uint32_t hv) {
 }
 
 void do_item_unlink(item *it, const uint32_t hv) {
-    MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
     if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
         STATS_LOCK();
@@ -305,7 +417,7 @@ void do_item_unlink(item *it, const uint32_t hv) {
         stats.curr_items -= 1;
         STATS_UNLOCK();
         mutex_lock(&cache_lock);
-        assoc_delete(ITEM_key(it), it->nkey, hv);
+        assoc_delete(it->rtc_key, hv);
         item_unlink_q(it);
         pthread_mutex_unlock(&cache_lock);
         if (it->refcount == 0) item_free(it);
@@ -314,21 +426,19 @@ void do_item_unlink(item *it, const uint32_t hv) {
 
 /* FIXME: Is it necessary to keep thsi copy/pasted code? */
 void do_item_unlink_nolock(item *it, const uint32_t hv) {
-    MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
     if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
         STATS_LOCK();
         stats.curr_bytes -= ITEM_ntotal(it);
         stats.curr_items -= 1;
         STATS_UNLOCK();
-        assoc_delete(ITEM_key(it), it->nkey, hv);
+        assoc_delete(it->rtc_key, hv);
         item_unlink_q(it);
         if (it->refcount == 0) item_free(it);
     }
 }
 
 void do_item_remove(item *it) {
-    MEMCACHED_ITEM_REMOVE(ITEM_key(it), it->nkey, it->nbytes);
     assert((it->it_flags & ITEM_SLABBED) == 0);
     if (it->refcount != 0) {
         it->refcount--;
@@ -340,7 +450,6 @@ void do_item_remove(item *it) {
 }
 
 void do_item_update(item *it) {
-    MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
@@ -355,8 +464,6 @@ void do_item_update(item *it) {
 }
 
 int do_item_replace(item *it, item *new_it, const uint32_t hv) {
-    MEMCACHED_ITEM_REPLACE(ITEM_key(it), it->nkey, it->nbytes,
-                           ITEM_key(new_it), new_it->nkey, new_it->nbytes);
     assert((it->it_flags & ITEM_SLABBED) == 0);
 
     do_item_unlink(it, hv);
@@ -365,6 +472,12 @@ int do_item_replace(item *it, item *new_it, const uint32_t hv) {
 
 /*@null@*/
 char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes) {
+#ifdef RTC_BENCHMARK
+    (void)slabs_clsid;
+    (void)limit;
+    *bytes = 0;
+    return NULL;
+#else
     unsigned int memlimit = 2 * 1024 * 1024;   /* 2MB max response size */
     char *buffer;
     unsigned int bufcurr;
@@ -401,6 +514,7 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
 
     *bytes = bufcurr;
     return buffer;
+#endif
 }
 
 void do_item_stats(ADD_STAT add_stats, void *c) {
@@ -477,6 +591,33 @@ void do_item_stats_sizes(ADD_STAT add_stats, void *c) {
 }
 
 /** wrapper around assoc_find which does the lazy expiration logic */
+#ifdef RTC_BENCHMARK
+item *do_item_get(uint64_t key, const uint32_t hv) {
+    mutex_lock(&cache_lock);
+    item *it = assoc_find(key, hv);
+    pthread_mutex_unlock(&cache_lock);
+
+    if (it != NULL && settings.oldest_live != 0 &&
+        settings.oldest_live <= current_time &&
+        it->time <= settings.oldest_live) {
+        do_item_unlink(it, hv);
+        it = NULL;
+    }
+
+    if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
+        do_item_unlink(it, hv);
+        it = NULL;
+    }
+
+    if (it != NULL) {
+        it->refcount++;
+        it->it_flags |= ITEM_FETCHED;
+        DEBUG_REFCNT(it, '+');
+    }
+
+    return it;
+}
+#else
 item *do_item_get(const char *key, const size_t nkey, const uint32_t hv) {
     mutex_lock(&cache_lock);
     item *it = assoc_find(key, nkey, hv);
@@ -524,7 +665,17 @@ item *do_item_get(const char *key, const size_t nkey, const uint32_t hv) {
 
     return it;
 }
+#endif
 
+#ifdef RTC_BENCHMARK
+item *do_item_touch(uint64_t key, uint32_t exptime, const uint32_t hv) {
+    item *it = do_item_get(key, hv);
+    if (it != NULL) {
+        it->exptime = exptime;
+    }
+    return it;
+}
+#else
 item *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
                     const uint32_t hv) {
     item *it = do_item_get(key, nkey, hv);
@@ -533,6 +684,7 @@ item *do_item_touch(const char *key, size_t nkey, uint32_t exptime,
     }
     return it;
 }
+#endif
 
 /* expires items that are more recent than the oldest_live setting. */
 void do_item_flush_expired(void) {
@@ -550,7 +702,7 @@ void do_item_flush_expired(void) {
             if (iter->time >= settings.oldest_live) {
                 next = iter->next;
                 if ((iter->it_flags & ITEM_SLABBED) == 0) {
-                    do_item_unlink_nolock(iter, hash(ITEM_key(iter), iter->nkey, 0));
+                    do_item_unlink_nolock(iter, rtc_hash(iter->rtc_key));
                 }
             } else {
                 /* We've hit the first old item. Continue to the next queue. */
