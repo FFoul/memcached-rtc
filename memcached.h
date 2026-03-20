@@ -355,7 +355,9 @@ typedef struct _stritem {
 } item;
 
 typedef struct {
+#ifndef RTC_BENCHMARK
     pthread_t thread_id;        /* unique ID of this thread */
+#endif
     struct event_base *base;    /* libevent handle this thread uses */
     struct event notify_event;  /* listen event for notify pipe */
     int notify_receive_fd;      /* receiving end of notify pipe */
@@ -366,7 +368,9 @@ typedef struct {
 } LIBEVENT_THREAD;
 
 typedef struct {
+#ifndef RTC_BENCHMARK
     pthread_t thread_id;        /* unique ID of this thread */
+#endif
     struct event_base *base;    /* libevent handle this thread uses */
 } LIBEVENT_DISPATCHER_THREAD;
 

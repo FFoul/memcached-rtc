@@ -693,7 +693,6 @@ void thread_init(int nthreads, struct event_base *main_base) {
 #ifdef RTC_BENCHMARK
     settings.num_threads = nthreads;
     for (i = 0; i < nthreads; i++) {
-        threads[i].thread_id = pthread_self();
         if (pthread_mutex_init(&threads[i].stats.mutex, NULL) != 0) {
             perror("Failed to initialize thread stats mutex");
             exit(EXIT_FAILURE);
