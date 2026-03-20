@@ -89,7 +89,8 @@ static size_t item_make_header(const uint8_t nkey, const int flags, const int nb
 item *do_item_alloc(uint64_t key, const int flags, const rel_time_t exptime,
                     const int nbytes) {
     item *it = NULL;
-    size_t ntotal = sizeof(item) + nbytes;
+    size_t ntotal = sizeof(item);
+    (void)nbytes;
     if (settings.use_cas) {
         ntotal += sizeof(uint64_t);
     }
@@ -180,8 +181,9 @@ item *do_item_alloc(uint64_t key, const int flags, const rel_time_t exptime,
     it->it_flags = settings.use_cas ? ITEM_CAS : 0;
     it->nkey = 0;
     it->nsuffix = 0;
-    it->nbytes = nbytes;
+    it->nbytes = (int)sizeof(it->rtc_value);
     it->rtc_key = key;
+    memset(&it->rtc_value, 0, sizeof(it->rtc_value));
     it->exptime = exptime;
     pthread_mutex_unlock(&cache_lock);
     return it;
@@ -325,8 +327,9 @@ void item_free(item *it) {
  */
 #ifdef RTC_BENCHMARK
 bool item_size_ok(const int flags, const int nbytes) {
-    size_t ntotal = sizeof(item) + nbytes;
+    size_t ntotal = sizeof(item);
     (void)flags;
+    (void)nbytes;
     if (settings.use_cas) {
         ntotal += sizeof(uint64_t);
     }

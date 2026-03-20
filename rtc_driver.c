@@ -11,7 +11,7 @@
 #define NUM_SERVERS 32
 #define READ_RATIO 50
 #define NUM_OPERATIONS 10000000
-#define VALUE_SIZE 32
+#define VALUE_LANES 4
 
 typedef struct {
     size_t ops;
@@ -55,17 +55,16 @@ static void print_peak_rss(void) {
     fclose(file);
 }
 
-static void fill_default_value(char value[VALUE_SIZE]) {
+static void fill_default_value(rtc_value_t *value) {
     int i;
 
-    for (i = 0; i < VALUE_SIZE; i++) {
-        value[i] = 'x';
+    for (i = 0; i < VALUE_LANES; i++) {
+        value->lane[i] = 0x7878787878787878ULL;
     }
-    value[VALUE_SIZE - 1] = '\0';
 }
 
 static size_t estimate_required_bytes(int num_operations) {
-    size_t per_item = sizeof(item) + VALUE_SIZE + 2;
+    size_t per_item = sizeof(item);
     size_t data_bytes;
     size_t bucket_count = 1;
     size_t hash_bytes;
@@ -114,17 +113,16 @@ static void rtc_note_set_cmd(conn *connection, item *it) {
 }
 
 static bool rtc_store_bytes(conn *connection, int command, uint64_t key,
-                            const void *value, size_t value_len) {
+                            const rtc_value_t *value) {
     item *it;
     enum store_item_type result;
 
-    it = item_alloc(key, 0, realtime(0), (int)value_len + 2);
+    it = item_alloc(key, 0, realtime(0), (int)sizeof(*value));
     if (it == NULL) {
         return false;
     }
 
-    memcpy(ITEM_data(it), value, value_len);
-    memcpy(ITEM_data(it) + value_len, "\r\n", 2);
+    it->rtc_value = *value;
 
     rtc_note_set_cmd(connection, it);
     result = store_item(it, command, connection);
@@ -172,7 +170,7 @@ static int populate(conn *connection, const char *data_dir, int num_operations,
                     replay_result *result) {
     char file_name[PATH_MAX];
     char line[128];
-    char value[VALUE_SIZE];
+    rtc_value_t value;
     FILE *populate_fp;
     uint64_t start;
     int cnt = 0;
@@ -189,7 +187,7 @@ static int populate(conn *connection, const char *data_dir, int num_operations,
         return 1;
     }
 
-    fill_default_value(value);
+    fill_default_value(&value);
     start = mstime();
 
     while (cnt++ < num_operations && fgets(line, sizeof(line), populate_fp)) {
@@ -203,7 +201,7 @@ static int populate(conn *connection, const char *data_dir, int num_operations,
 
         result->ops++;
         result->writes++;
-        if (!rtc_store_bytes(connection, NREAD_ADD, key, value, VALUE_SIZE)) {
+        if (!rtc_store_bytes(connection, NREAD_ADD, key, &value)) {
             fprintf(stderr, "failed to populate key %llu\n",
                     (unsigned long long)key);
             fclose(populate_fp);
@@ -221,7 +219,7 @@ static int populate(conn *connection, const char *data_dir, int num_operations,
 static int replay_run_trace(conn *connection, const char *path,
                             int num_operations, replay_result *result) {
     char line[128];
-    char value[VALUE_SIZE];
+    rtc_value_t value;
     FILE *benchmark_fp = fopen(path, "r");
     uint64_t start;
     int cnt = 0;
@@ -231,7 +229,7 @@ static int replay_run_trace(conn *connection, const char *path,
         return 1;
     }
 
-    fill_default_value(value);
+    fill_default_value(&value);
     start = mstime();
 
     while (cnt++ < num_operations && fgets(line, sizeof(line), benchmark_fp)) {
@@ -268,8 +266,7 @@ static int replay_run_trace(conn *connection, const char *path,
         } else if (strcmp(operation, "UPDATE") == 0) {
             result->ops++;
             result->writes++;
-            if (!rtc_store_bytes(connection, NREAD_SET, key, value,
-                                 VALUE_SIZE)) {
+            if (!rtc_store_bytes(connection, NREAD_SET, key, &value)) {
                 fprintf(stderr, "failed to update key %llu\n",
                         (unsigned long long)key);
                 fclose(benchmark_fp);

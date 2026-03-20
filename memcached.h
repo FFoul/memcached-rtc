@@ -104,10 +104,11 @@ struct event {
 }
 
 #ifdef RTC_BENCHMARK
-#define ITEM_data(item) (((char*)&((item)->data)) \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+typedef struct {
+    uint64_t lane[4];
+} rtc_value_t;
 
-#define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nbytes \
+#define ITEM_ntotal(item) (sizeof(struct _stritem) \
          + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
 #else
 #define ITEM_key(item) (((char*)&((item)->data)) \
@@ -348,6 +349,7 @@ typedef struct _stritem {
     unsigned short  refcount;
 #ifdef RTC_BENCHMARK
     uint64_t        rtc_key;    /* benchmark key */
+    rtc_value_t     rtc_value;  /* benchmark value */
     uint8_t         rtc_reserved[2];
 #else
     uint8_t         nsuffix;    /* length of flags-and-length string */
