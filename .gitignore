@@ -39,3 +39,7 @@ doc/protocol-binary.txt
 /timedrun
 /doc/doxy
 /memcached.spec
+/memcached_rtc
+*.dSYM/
+.*.o.bc
+.DS_Store
