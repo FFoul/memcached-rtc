@@ -12,30 +12,38 @@
 #define REALTIME_MAXDELTA (60 * 60 * 24 * 30)
 
 time_t process_started;
+static pthread_mutex_t process_started_lock = PTHREAD_MUTEX_INITIALIZER;
 
 rel_time_t realtime(const time_t exptime) {
+    time_t ps;
+
     if (exptime == 0) {
         return 0;
     }
 
+    pthread_mutex_lock(&process_started_lock);
     if (process_started == 0) {
         process_started = 1;
     }
+    ps = process_started;
+    pthread_mutex_unlock(&process_started_lock);
 
     if (exptime > REALTIME_MAXDELTA) {
-        if (exptime <= process_started) {
+        if (exptime <= ps) {
             return (rel_time_t)1;
         }
-        return (rel_time_t)(exptime - process_started);
+        return (rel_time_t)(exptime - ps);
     }
 
     return (rel_time_t)(exptime + current_time);
 }
 
 void rtc_update_time(void) {
+    pthread_mutex_lock(&process_started_lock);
     if (process_started == 0) {
         process_started = 1;
     }
+    pthread_mutex_unlock(&process_started_lock);
     if (current_time == 0) {
         current_time = 1;
     }
@@ -44,7 +52,9 @@ void rtc_update_time(void) {
 void rtc_stats_init(void) {
     memset(&stats, 0, sizeof(stats));
     stats.accepting_conns = true;
+    pthread_mutex_lock(&process_started_lock);
     process_started = 1;
+    pthread_mutex_unlock(&process_started_lock);
     current_time = 1;
     stats_prefix_init();
 }
