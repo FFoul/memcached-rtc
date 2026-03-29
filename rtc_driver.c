@@ -305,6 +305,20 @@ static void accumulate_result(replay_result *dst, const replay_result *src) {
   dst->writes += src->writes;
 }
 
+static void free_run_workers(run_worker **workers, int num_servers) {
+  int i;
+
+  if (workers == NULL) {
+    return;
+  }
+
+  for (i = 0; i < num_servers; i++) {
+    free(workers[i]);
+  }
+
+  free(workers);
+}
+
 static void *run_worker_main(void *arg) {
   run_worker *worker = arg;
   conn connection;
@@ -350,7 +364,7 @@ static int run_benchmark(const char *data_dir, int num_operations,
   conn load_connection;
   replay_result load_stats = {0};
   replay_result run_stats = {0};
-  run_worker *workers;
+  run_worker **workers;
   pthread_t *threads;
   uint64_t start_bench;
   uint64_t end_bench;
@@ -372,7 +386,7 @@ static int run_benchmark(const char *data_dir, int num_operations,
   threads = calloc((size_t)num_servers, sizeof(*threads));
   if (workers == NULL || threads == NULL) {
     fprintf(stderr, "failed to allocate worker state\n");
-    free(workers);
+    free_run_workers(workers, num_servers);
     free(threads);
     return 1;
   }
@@ -383,17 +397,26 @@ static int run_benchmark(const char *data_dir, int num_operations,
   if (strcmp(data_dir, DEFAULT_DATA_DIR) != 0) {
     fprintf(stderr, "RTC benchmark requires --data-dir to remain %s\n",
             DEFAULT_DATA_DIR);
-    free(workers);
+    free_run_workers(workers, num_servers);
     free(threads);
     return 1;
   }
 
   for (i = 0; i < num_servers; i++) {
-    workers[i].thread_id = i;
-    workers[i].num_operations = num_operations;
-    workers[i].read_ratio = read_ratio;
-    if (pthread_create(&threads[i], NULL, run_worker_main, &workers[i]) != 0) {
+    workers[i] = calloc(1, sizeof(*workers[i]));
+    if (workers[i] == NULL) {
+      fprintf(stderr, "failed to allocate worker arg %d\n", i);
+      rc = 1;
+      break;
+    }
+
+    workers[i]->thread_id = i;
+    workers[i]->num_operations = num_operations;
+    workers[i]->read_ratio = read_ratio;
+    if (pthread_create(&threads[i], NULL, run_worker_main, workers[i]) != 0) {
       fprintf(stderr, "failed to create worker thread %d\n", i);
+      free(workers[i]);
+      workers[i] = NULL;
       rc = 1;
       break;
     }
@@ -402,13 +425,17 @@ static int run_benchmark(const char *data_dir, int num_operations,
 
   for (i = 0; i < created_threads; i++) {
     pthread_join(threads[i], NULL);
-    if (workers[i].rc != 0) {
+    if (workers[i] == NULL) {
+      rc = 1;
+      continue;
+    }
+    if (workers[i]->rc != 0) {
       rc = 1;
     }
-    accumulate_result(&run_stats, &workers[i].result);
+    accumulate_result(&run_stats, &workers[i]->result);
   }
 
-  free(workers);
+  free_run_workers(workers, num_servers);
   free(threads);
 
   if (rc != 0) {
